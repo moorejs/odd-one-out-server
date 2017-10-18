@@ -1,0 +1,4 @@
+objs
+dist/main
+dist/main.exe
+kit-libs-*
