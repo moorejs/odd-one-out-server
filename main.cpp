@@ -147,7 +147,6 @@ int main(void) {
 	auto delta = frame_duration(1);
 	float dt = 1.0f / 10.0f;
 
-
 	std::thread gameLoop([&]() {
 		while (true) {
 			auto start_time = std::chrono::steady_clock::now();
@@ -162,14 +161,7 @@ int main(void) {
 
 						// tell other clients
 						for (auto& client : clients) {
-							//Packet* packet = new Packet();
-							/*
-							packet->payload.push_back(STAGING_PLAYER_CONNECT);
-							packet->payload.push_back(newId);
-
-							packet->header = packet->payload.size();*/
-
-							client->sock.writeQueue.enqueue(ConnectMessage::pack(newId));
+							client->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_PLAYER_CONNECT, newId));
 						};
 
 						clients.emplace_back(new Client(newId, fd));
@@ -195,7 +187,7 @@ int main(void) {
 										// TODO: queue up message saying player voted to start the game
 										// or do it now?
 										for (auto& c : clients) {
-											c->sock.writeQueue.enqueue(VoteToStartMessage::pack(client->id));
+											c->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_VOTE_TO_START, client->id));
 										}
 									}
 
@@ -209,6 +201,10 @@ int main(void) {
 										std::cout << "Client vetoed the game start" << std::endl;
 
 										// TODO: queue up message start vetod by x message
+										// or do it now?
+										for (auto& c : clients) {
+											c->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_VETO_START, client->id));
+										}
 									}
 
 									break;
@@ -222,14 +218,20 @@ int main(void) {
 
 							delete out;
 						}
-					};
+					}
 
 					if (starting) {
 						startingTimer += dt;
 
 						if (startingTimer > 5.0f) {
-							std::cout << "Game starting. Leaving staging (not really)." << std::endl;
-							// TODO: send out start game message
+							std::cout << "Game starting. Leaving staging." << std::endl;
+							for (auto& c : clients) {
+								Packet* packet = new Packet();
+								packet->payload.emplace_back(STAGING_START_GAME);
+								packet->header = packet->payload.size();
+								c->sock.writeQueue.enqueue(packet);
+							}
+							state = IN_GAME;
 						}
 					}
 
@@ -258,7 +260,7 @@ int main(void) {
 
 							delete out;
 						}
-					};
+					}
 
 					// write state updates
 					for (auto& client : clients) {
@@ -270,7 +272,7 @@ int main(void) {
 						delta->payload.push_back('O');
 						delta->header = delta->payload.size();
 						client->sock.writeQueue.enqueue(delta);
-					};
+					}
 
 					break;
 				}
