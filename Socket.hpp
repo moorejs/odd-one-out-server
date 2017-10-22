@@ -37,51 +37,42 @@ enum MessageType {
   INPUT,
 };
 
-// TODO: add packing/unpacking here?
-struct Message {
-  MessageType type : 8;
-};
-
-struct ConnectMessage {
+// simple message just has type and id of client
+struct SimpleMessage {
   MessageType type : 8;
   uint8_t id;
 
-  static Packet* pack(uint8_t id) {
+  static Packet* pack(MessageType type, uint8_t id = 255) {
     Packet* packet = new Packet();
 
-    packet->payload.emplace_back(STAGING_PLAYER_CONNECT);
-    packet->payload.emplace_back(id);
+    packet->payload.emplace_back(type);
+    if (id != 255) {
+      packet->payload.emplace_back(id);
+    }
 
     packet->header = packet->payload.size();
 
     return packet;
   }
-};
 
-struct VoteToStartMessage {
-  MessageType type : 8;
-  uint8_t id;
-
-  static Packet* pack(uint8_t id) {
-    Packet* packet = new Packet();
-
-    packet->payload.emplace_back(STAGING_VOTE_TO_START);
-    packet->payload.emplace_back(id);
-
-    packet->header = packet->payload.size();
-
-    return packet;
+  static const SimpleMessage* unpack(const std::vector<uint8_t>& payload) {
+    return reinterpret_cast<const SimpleMessage*>(payload.data());
   }
 };
-
 
 class Socket {
 
+  int fd;
+  std::atomic<bool> connected;
+
 public:
   Socket(int fd)
-    : readThread([&]() {
+    : fd(fd),
+      connected(true),
+      readThread([&]() {
         while (true) {
           if (!connected) {
+            std::cout << "Disconnected, exiting read thread" << std::endl;
             return;
           }
 
@@ -99,14 +90,13 @@ public:
 
           if (!connected) {
             delete packet;
+            std::cout << "Disconnected, not writing packet and exiting write thread" << std::endl;
             return;
           }
 
           sendPacket(packet);
         }
-      }),
-      fd(fd),
-      connected(true)
+      })
   {
     readThread.detach();
     writeThread.detach();
@@ -133,9 +123,6 @@ public:
   std::thread writeThread;
 
 private:
-  int fd;
-  std::atomic<bool> connected;
-
   // recv that does error checking and connection checking
   int recv(void* buffer, size_t size) {
     int n = ::recv(fd, buffer, size, 0);
