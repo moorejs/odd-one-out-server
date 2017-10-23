@@ -24,188 +24,278 @@ using moodycamel::ReaderWriterQueue;
 using moodycamel::BlockingReaderWriterQueue;
 
 struct Packet {
-  uint8_t header;
-  std::vector<uint8_t> payload;
+	uint8_t header;
+	std::vector<uint8_t> payload;
 };
 
 enum MessageType {
-  STAGING_PLAYER_CONNECT,
-  STAGING_PLAYER_DISCONNECT,
-  STAGING_VOTE_TO_START,
-  STAGING_VETO_START,
-  STAGING_START_GAME,
-  INPUT,
+	STAGING_PLAYER_CONNECT,
+	STAGING_PLAYER_DISCONNECT,
+	STAGING_VOTE_TO_START,
+	STAGING_VETO_START,
+	STAGING_START_GAME,
+	INPUT,
 };
 
 // simple message just has type and id of client
 struct SimpleMessage {
-  MessageType type : 8;
-  uint8_t id;
+	MessageType type : 8;
+	uint8_t id;
 
-  static Packet* pack(MessageType type, uint8_t id = 255) {
-    Packet* packet = new Packet();
+	static Packet* pack(MessageType type, uint8_t id = 255) {
+		Packet* packet = new Packet();
 
-    packet->payload.emplace_back(type);
-    if (id != 255) {
-      packet->payload.emplace_back(id);
-    }
+		packet->payload.emplace_back(type);
+		if (id != 255) {
+			packet->payload.emplace_back(id);
+		}
 
-    packet->header = packet->payload.size();
+		packet->header = packet->payload.size();
 
-    return packet;
-  }
+		return packet;
+	}
 
-  static const SimpleMessage* unpack(const std::vector<uint8_t>& payload) {
-    return reinterpret_cast<const SimpleMessage*>(payload.data());
-  }
+	static const SimpleMessage* unpack(const std::vector<uint8_t>& payload) {
+		return reinterpret_cast<const SimpleMessage*>(payload.data());
+	}
 };
 
 class Socket {
 
-  int fd;
-  std::atomic<bool> connected;
+	int fd;
+	std::atomic<bool> connected;
 
 public:
-  Socket(int fd)
-    : fd(fd),
-      connected(true),
-      readThread([&]() {
-        while (true) {
-          if (!connected) {
-            std::cout << "Disconnected, exiting read thread" << std::endl;
-            return;
-          }
+	Socket(int fd)
+		: fd(fd),
+			connected(true),
+			readThread([&]() {
+				while (true) {
+					if (!connected) {
+						std::cout << "Disconnected, exiting read thread" << std::endl;
+						return;
+					}
 
-          readQueue.enqueue(getPacket());
-        }
-      }),
-      writeThread([&]() {
-        while (true) {
-          Packet* packet;
-          writeQueue.wait_dequeue(packet);
+					readQueue.enqueue(getPacket());
+				}
+			}),
+			writeThread([&]() {
+				while (true) {
+					Packet* packet;
+					writeQueue.wait_dequeue(packet);
 
-          if (!packet) {
-            continue;
-          }
+					if (!packet) {
+						continue;
+					}
 
-          if (!connected) {
-            delete packet;
-            std::cout << "Disconnected, not writing packet and exiting write thread" << std::endl;
-            return;
-          }
+					if (!connected) {
+						delete packet;
+						std::cout << "Disconnected, not writing packet and exiting write thread" << std::endl;
+						return;
+					}
 
-          sendPacket(packet);
-        }
-      })
-  {
-    readThread.detach();
-    writeThread.detach();
-  }
+					sendPacket(packet);
+				}
+			})
+	{
+		readThread.detach();
+		writeThread.detach();
+	}
 
-  // no move or copying
-  Socket(const Socket&) = delete;
-  Socket& operator=(const Socket&) = delete;
-  Socket(Socket&& other) = delete;
-  Socket& operator=(Socket&&) = delete;
+	// no move or copying
+	Socket(const Socket&) = delete;
+	Socket& operator=(const Socket&) = delete;
+	Socket(Socket&& other) = delete;
+	Socket& operator=(Socket&&) = delete;
 
-  void close() {
-    ::close(fd);
-  }
+	void close() {
+		::close(fd);
+	}
 
-  bool isConnected() {
-    return connected;
-  }
+	bool isConnected() {
+		return connected;
+	}
 
-  ReaderWriterQueue<Packet*> readQueue;
-  BlockingReaderWriterQueue<Packet*> writeQueue;
+	static int initServer(const std::string& port, int backlog = 10) {
+		// Much of the server code here is from
+		// http://beej.us/guide/bgnet/output/html/multipage/clientserver.html#simpleserver
 
-  std::thread readThread;
-  std::thread writeThread;
+		int sockfd;	// listen on sock_fd, new connection on new_fd
+		struct addrinfo hints, *servinfo, *p;
+		int yes = 1;
+		int rv;
+
+		memset(&hints, 0, sizeof hints);
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_flags = AI_PASSIVE;	// use my IP
+
+		if ((rv = getaddrinfo(nullptr, port.c_str(), &hints, &servinfo)) != 0) {
+			fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+			exit(1);
+		}
+
+		// loop through all the results and bind to the first we can
+		for (p = servinfo; p != NULL; p = p->ai_next) {
+			if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+				perror("server: socket");
+				continue;
+			}
+
+			if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+				perror("setsockopt");
+				exit(1);
+			}
+
+			if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+				::close(sockfd);
+				perror("server: bind");
+				continue;
+			}
+
+			break;
+		}
+
+		freeaddrinfo(servinfo);	// all done with this structure
+
+		if (p == NULL) {
+			fprintf(stderr, "server: failed to bind\n");
+			exit(1);
+		}
+
+		if (listen(sockfd, backlog) == -1) {
+			perror("listen");
+			exit(1);
+		}
+
+		printf("server: waiting for connections...\n");
+
+		return sockfd;
+	}
+
+	// accept client
+	static int accept(int sockfd) {
+		static auto get_in_addr = [](struct sockaddr* sa) -> void* {
+			if (sa->sa_family == AF_INET) {
+				return &(((struct sockaddr_in*)sa)->sin_addr);
+			}
+			return &(((struct sockaddr_in6*)sa)->sin6_addr);
+		};
+
+		static auto get_in_port = [](struct sockaddr* sa) -> int {
+			if (sa->sa_family == AF_INET) {
+				return ntohs(((struct sockaddr_in*)sa)->sin_port);
+			}
+			return ntohs(((struct sockaddr_in6*)sa)->sin6_port);
+		};
+
+		static struct sockaddr_storage their_addr;	// connector's address information
+		static socklen_t sin_size = sizeof their_addr;
+
+		int fd = ::accept(sockfd, (struct sockaddr*)&their_addr, &sin_size);
+		if (fd == -1) {
+			perror("accept");
+			return -1;
+		}
+
+		static char s[INET6_ADDRSTRLEN];
+		// convert IP to string to print
+		inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr*)&their_addr), s, sizeof s);
+		printf("server: got connection from %s %d\n", s, get_in_port((struct sockaddr*)&their_addr));
+
+		return fd;
+	}
+
+	ReaderWriterQueue<Packet*> readQueue;
+	BlockingReaderWriterQueue<Packet*> writeQueue;
 
 private:
-  // recv that does error checking and connection checking
-  int recv(void* buffer, size_t size) {
-    int n = ::recv(fd, buffer, size, 0);
+	std::thread readThread;
+	std::thread writeThread;
 
-    if (n < 0) {
-      perror("recv");
-    }
+	// recv that does error checking and connection checking
+	int recv(void* buffer, size_t size) {
+		int n = ::recv(fd, buffer, size, 0);
 
-    if (n == 0) {
-      connected = false;
-    }
+		if (n < 0) {
+			perror("recv");
+		}
 
-    return n;
-  }
+		if (n == 0) {
+			connected = false;
+		}
 
-  // send that does error checking and connection checking
-  int send(void* buffer, size_t size) {
-    int n = ::send(fd, buffer, size, 0);
+		return n;
+	}
 
-    if (n < 0) {
-      perror("send");
-    }
+	// send that does error checking and connection checking
+	int send(void* buffer, size_t size) {
+		int n = ::send(fd, buffer, size, 0);
 
-    if (n == 0) {
-      connected = false;
-    }
+		if (n < 0) {
+			perror("send");
+		}
 
-    return n;
-  }
+		if (n == 0) {
+			connected = false;
+		}
 
-  // get complete packet
-  Packet* getPacket() {
-    int so_far;
-    Packet* packet = new Packet();
+		return n;
+	}
 
-    // get header (could be multiple bytes in future)
-    so_far = 0;
-    do {
-      int n = recv(&packet->header + so_far, (sizeof packet->header) - so_far);
-      so_far += n;
+	// get complete packet
+	Packet* getPacket() {
+		unsigned so_far;
+		Packet* packet = new Packet();
 
-      if (n == 0) {
-        delete packet;
-        return nullptr;
-      }
-    } while (so_far < sizeof packet->header);
+		// get header (could be multiple bytes in future)
+		so_far = 0;
+		do {
+			int n = recv(&packet->header + so_far, (sizeof packet->header) - so_far);
+			so_far += n;
 
-    assert(packet->header > 0);
+			if (n == 0) {
+				delete packet;
+				return nullptr;
+			}
+		} while (so_far < sizeof packet->header);
 
-    // get payload
-    packet->payload.resize(packet->header);
-    so_far = 0;
-    do {
-      int n = recv(packet->payload.data() + so_far, packet->header - so_far);
-      so_far += n;
+		assert(packet->header > 0);
 
-      if (n == 0) {
-        delete packet;
-        return nullptr;
-      }
-    } while (so_far < packet->header);
-    packet->payload.resize(packet->header);
+		// get payload
+		packet->payload.resize(packet->header);
+		so_far = 0;
+		do {
+			int n = recv(packet->payload.data() + so_far, packet->header - so_far);
+			so_far += n;
 
-    return packet;
-  }
+			if (n == 0) {
+				delete packet;
+				return nullptr;
+			}
+		} while (so_far < packet->header);
+		packet->payload.resize(packet->header);
 
-  // sends all data in vector
-  bool sendPacket(Packet* packet) {
-    // send header (could be multiple bytes in future)
-    int n = send(&packet->header, 1);
-    if (n <= 0) {
-      return false;
-    }
+		return packet;
+	}
 
-    int so_far = 0;
-    do {
-      int m = send(packet->payload.data() + so_far, packet->payload.size() - so_far);
-      so_far += m;
-      if (m <= 0) {
-        return false;
-      }
-    } while (so_far < packet->payload.size());
+	// sends all data in vector
+	bool sendPacket(Packet* packet) {
+		// send header (could be multiple bytes in future)
+		int n = send(&packet->header, 1);
+		if (n <= 0) {
+			return false;
+		}
 
-    return true;
-  }
+		unsigned so_far = 0;
+		do {
+			int m = send(packet->payload.data() + so_far, packet->payload.size() - so_far);
+			so_far += m;
+			if (m <= 0) {
+				return false;
+			}
+		} while (so_far < packet->payload.size());
+
+		return true;
+	}
 };

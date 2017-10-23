@@ -1,16 +1,3 @@
-// Much of the server code here is from
-// http://beej.us/guide/bgnet/output/html/multipage/clientserver.html#simpleserver
-#include <cstdio>
-#include <cstdlib>
-#include <unistd.h>
-#include <cerrno>
-#include <cstring>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-
 #include "Socket.hpp"
 
 #include <atomic>
@@ -22,82 +9,20 @@
 
 #include "queue/readerwriterqueue.h"
 
-using namespace moodycamel;
+using moodycamel::ReaderWriterQueue;
 
-#define PORT "3490"	// the port users will be connecting to
-
-#define BACKLOG 10	// how many pending connections queue will hold
-
-void* get_in_addr(struct sockaddr* sa) {
-	if (sa->sa_family == AF_INET) {
-		return &(((struct sockaddr_in*)sa)->sin_addr);
-	}
-
-	return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-// probably could reuse the code above somehow
-int get_in_port(struct sockaddr* sa) {
-	if (sa->sa_family == AF_INET) {
-		return ntohs(((struct sockaddr_in*)sa)->sin_port);
-	}
-
-	return ntohs(((struct sockaddr_in6*)sa)->sin6_port);
-}
+#ifdef DEBUG
+	#define DEBUG_PRINT(x) std::cout << std::this_thread::get_id() << ":" << __FILE__ << ":" << __LINE__ << ": " << x << std::endl
+	#define IF_DEBUG(x) x
+#else
+	#define DEBUG_PRINT(x)
+	#define IF_DEBUG(x)
+#endif
 
 int main(void) {
-	int sockfd, new_fd;	// listen on sock_fd, new connection on new_fd
-	struct addrinfo hints, *servinfo, *p;
-	struct sockaddr_storage their_addr;	// connector's address information
-	socklen_t sin_size;
-	int yes = 1;
-	char s[INET6_ADDRSTRLEN];
-	int rv;
+	DEBUG_PRINT("IN DEBUG MODE");
 
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = AI_PASSIVE;	// use my IP
-
-	if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return 1;
-	}
-
-	// loop through all the results and bind to the first we can
-	for (p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			perror("server: socket");
-			continue;
-		}
-
-		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-			perror("setsockopt");
-			exit(1);
-		}
-
-		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			close(sockfd);
-			perror("server: bind");
-			continue;
-		}
-
-		break;
-	}
-
-	freeaddrinfo(servinfo);	// all done with this structure
-
-	if (p == NULL) {
-		fprintf(stderr, "server: failed to bind\n");
-		exit(1);
-	}
-
-	if (listen(sockfd, BACKLOG) == -1) {
-		perror("listen");
-		exit(1);
-	}
-
-	printf("server: waiting for connections...\n");
+	int sockfd = Socket::initServer("3490");
 
 	struct Client {
 		uint8_t id;
@@ -107,21 +32,16 @@ int main(void) {
 	};
 
 	ReaderWriterQueue<int> newClients;
-	std::thread acceptThread([&]() {
+
+	std::thread acceptThread([&sockfd, &newClients]() {
 		int accepted = 0;
+
 		while (accepted < 3) {
-			sin_size = sizeof their_addr;
-			new_fd = accept(sockfd, (struct sockaddr*)&their_addr, &sin_size);
-			if (new_fd == -1) {
-				perror("accept");
+			int fd = Socket::accept(sockfd);
+			if (fd == -1) {
 				continue;
 			}
-
-			// convert IP to string to print
-			inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr*)&their_addr), s, sizeof s);
-			printf("server: got connection from %s %d\n", s, get_in_port((struct sockaddr*)&their_addr));
-
-			newClients.enqueue(new_fd);
+			newClients.enqueue(fd);
 
 			accepted++;
 		}
@@ -181,6 +101,7 @@ int main(void) {
 									if (!starting) {
 										starting = true;
 										startingTimer = 0.0f;
+										IF_DEBUG(startingTimer = 4.5f);
 
 										std::cout << "Client voted to start the game" << std::endl;
 
