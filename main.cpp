@@ -217,7 +217,7 @@ int main(void) {
 						if (stagingState.startingTimer > 5.0f) {
 							std::cout << "Game starting. Leaving staging." << std::endl;
 							for (auto& c : clients) {
-								c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_START_GAME));
+								c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_START_GAME, { 200 }));
 							}
 							state = IN_GAME;
 						}
