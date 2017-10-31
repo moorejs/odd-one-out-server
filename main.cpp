@@ -28,6 +28,12 @@ int main(void) {
 		uint8_t id;
 		Socket sock;
 
+		enum Role { // TODO: reuse code from client
+			NONE,
+			ROBBER,
+			COP,
+		} role = Role::NONE;
+
 		Client(uint8_t id, int fd) : id(id), sock(fd) {}
 	};
 
@@ -58,9 +64,12 @@ int main(void) {
 		IN_GAME,
 	} state = STAGING;
 
-	// staging game state
-	bool starting = false;
-	float startingTimer = 0.0f;
+	struct StagingState {
+		bool starting = false;
+		float startingTimer = 0.0f;
+		Client* robber = nullptr; // everyone else assumed to be cop
+		unsigned playerUnready = 0;
+	} stagingState;
 
 	// clock timing logic from https://stackoverflow.com/a/20381816
 	typedef std::chrono::duration<int, std::ratio<1, 10>> frame_duration;
@@ -79,15 +88,28 @@ int main(void) {
 					while (newClients.try_dequeue(fd)) {
 						uint8_t newId = clients.size();
 
-						// tell other clients
+						std::vector<uint8_t> syncData;
+						syncData.push_back(newId);
 						for (auto& client : clients) {
-							client->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_PLAYER_CONNECT, newId));
+							client->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_PLAYER_CONNECT, {newId}));
+							syncData.push_back(client->id);
+							syncData.push_back(client->role);
 						};
 
 						clients.emplace_back(new Client(newId, fd));
+
+						clients.back()->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_PLAYER_SYNC, syncData));
+
+						stagingState.playerUnready += 1;
+
+						// TODO: tell new client about game settings / staging state
 					}
 
 					for (auto& client : clients) {
+						if (!client->sock.isConnected()) {
+							continue;
+						}
+
 						// read pending messages from clients
 						Packet* out;
 						while (client->sock.readQueue.try_dequeue(out)) {
@@ -98,41 +120,89 @@ int main(void) {
 
 							switch (out->payload.at(0)) { // message type
 								case MessageType::STAGING_VOTE_TO_START: {
-									if (!starting) {
-										starting = true;
-										startingTimer = 0.0f;
-										IF_DEBUG(startingTimer = 4.5f);
+									if (stagingState.starting) {
+										break;
+									}
 
-										std::cout << "Client voted to start the game" << std::endl;
+									if (clients.size() < 2) {
+										break;
+									}
 
-										// TODO: queue up message saying player voted to start the game
-										// or do it now?
-										for (auto& c : clients) {
-											c->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_VOTE_TO_START, client->id));
-										}
+									if (stagingState.playerUnready > 0) {
+										// TODO: error message saying not all players are ready
+										break;
+									}
+
+									stagingState.starting = true;
+									stagingState.startingTimer = 0.0f;
+									IF_DEBUG(stagingState.startingTimer = 3.0f);
+
+									std::cout << "Client voted to start the game" << std::endl;
+
+									// TODO: queue up message saying player voted to start the game
+									// or do it now?
+									for (auto& c : clients) {
+										c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_VOTE_TO_START, {client->id}));
 									}
 
 									break;
 								}
 
 								case MessageType::STAGING_VETO_START: {
-									if (starting) {
-										starting = false;
+									if (!stagingState.starting) {
+										break;
+									}
 
-										std::cout << "Client vetoed the game start" << std::endl;
+									stagingState.starting = false;
 
-										// TODO: queue up message start vetod by x message
-										// or do it now?
-										for (auto& c : clients) {
-											c->sock.writeQueue.enqueue(SimpleMessage::pack(MessageType::STAGING_VETO_START, client->id));
-										}
+									std::cout << "Client vetoed the game start" << std::endl;
+
+									// TODO: queue up message start vetod by x message
+									// or do it now?
+									for (auto& c : clients) {
+										c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_VETO_START, {client->id}));
+									}
+
+									break;
+								}
+
+								case MessageType::STAGING_ROLE_CHANGE: {
+									if (stagingState.starting) {
+										break;
+									}
+
+									DEBUG_PRINT("client " << (int)client->id << " wants role " << int(out->payload[1]));
+
+									if (out->payload[1] == Client::Role::ROBBER && stagingState.robber) { // can't be robber if someone else is
+										client->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_ROLE_CHANGE_REJECTION, {stagingState.robber->id}));
+										break;
+									}
+
+									if (client->role == Client::Role::NONE) { // client has never selected anything
+										stagingState.playerUnready -= 1;
+									}
+
+									// client is no longer robber
+									if (client->role == Client::Role::ROBBER && out->payload[1] != Client::Role::ROBBER) {
+										stagingState.robber = nullptr;
+									}
+
+									if (out->payload[1] == Client::Role::ROBBER) { // desires to be robber
+										stagingState.robber = client.get();
+									}
+
+									client->role = static_cast<Client::Role>(out->payload[1]);
+
+									// tell players of role change
+									for (auto& c : clients) {
+										c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_ROLE_CHANGE, {client->id, out->payload[1]}));
 									}
 
 									break;
 								}
 
 								default: {
-									std::cout << "Unknown starting message type: " << out->payload.at(0) << std::endl;
+									std::cout << "Unknown starting message type: " << (int)out->payload.at(0) << std::endl;
 									break;
 								}
 							}
@@ -141,16 +211,13 @@ int main(void) {
 						}
 					}
 
-					if (starting) {
-						startingTimer += dt;
+					if (stagingState.starting) {
+						stagingState.startingTimer += dt;
 
-						if (startingTimer > 5.0f) {
+						if (stagingState.startingTimer > 5.0f) {
 							std::cout << "Game starting. Leaving staging." << std::endl;
 							for (auto& c : clients) {
-								Packet* packet = new Packet();
-								packet->payload.emplace_back(STAGING_START_GAME);
-								packet->header = packet->payload.size();
-								c->sock.writeQueue.enqueue(packet);
+								c->sock.writeQueue.enqueue(Packet::pack(MessageType::STAGING_START_GAME));
 							}
 							state = IN_GAME;
 						}
@@ -174,7 +241,7 @@ int main(void) {
 							switch (out->payload.at(0)) { // message type
 
 								default: {
-									std::cout << "Unknown game message type: " << out->payload.at(0) << std::endl;
+									std::cout << "Unknown game message type: " << (int)out->payload[0] << std::endl;
 									break;
 								}
 							}

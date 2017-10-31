@@ -3,6 +3,7 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <initializer_list>
 
 #include <iostream>
 
@@ -23,10 +24,14 @@
 using moodycamel::ReaderWriterQueue;
 using moodycamel::BlockingReaderWriterQueue;
 
-struct Packet {
-	uint8_t header;
-	std::vector<uint8_t> payload;
-};
+// Thoughts: Really not happy with current serialization method but it works
+
+/* TODO:
+ * - client tries to reconnect on disconnect?
+ * - allow for way to stack messages and write all at once
+ * - StagingState / GameState delta 
+ */
+
 
 enum MessageType {
 	STAGING_PLAYER_CONNECT,
@@ -34,31 +39,67 @@ enum MessageType {
 	STAGING_VOTE_TO_START,
 	STAGING_VETO_START,
 	STAGING_START_GAME,
+	STAGING_ROLE_CHANGE,
+	STAGING_ROLE_CHANGE_REJECTION,
+	STAGING_PLAYER_SYNC,
 	INPUT,
 };
 
-// simple message just has type and id of client
-struct SimpleMessage {
-	MessageType type : 8;
-	uint8_t id;
+struct Packet {
+	uint8_t header;
+	std::vector<uint8_t> payload;
 
-	static Packet* pack(MessageType type, uint8_t id = 255) {
+	static Packet* pack(MessageType type, std::initializer_list<uint8_t> extra = {}) {
 		Packet* packet = new Packet();
 
 		packet->payload.emplace_back(type);
-		if (id != 255) {
-			packet->payload.emplace_back(id);
-		}
+		packet->payload.insert(packet->payload.end(), extra.begin(), extra.end());
 
 		packet->header = packet->payload.size();
 
 		return packet;
 	}
 
-	static const SimpleMessage* unpack(const std::vector<uint8_t>& payload) {
-		return reinterpret_cast<const SimpleMessage*>(payload.data());
+	static Packet* pack(MessageType type, std::vector<uint8_t> extra) {
+		Packet* packet = new Packet();
+
+		packet->payload.emplace_back(type);
+		packet->payload.insert(packet->payload.end(), extra.begin(), extra.end());
+
+		packet->header = packet->payload.size();
+
+		return packet;
+	}
+/*
+	static Packet* pack(MessageType type, std::initializer_list<uint8_t> extra = {}) {
+		Packet* packet = new Packet();
+
+		packet->payload.emplace_back(type);
+		packet->payload.insert(packet->payload.end(), extra.begin(), extra.end());
+
+		packet->header = packet->payload.size();
+
+		return packet;
+	}*/
+};
+
+struct SimpleMessage {
+	uint8_t id;
+
+	static const SimpleMessage* unpack(Packet* packet) {
+		return reinterpret_cast<const SimpleMessage*>(packet->payload.data() + 1);
 	}
 };
+
+/*
+struct RoleChangeMessage {
+	bool robberRequest : 8
+
+	static const SimpleMessage* unpack(Packet* packet) {
+		return reinterpret_cast<const SimpleMessage*>(packet->payload.data() + 1);
+	}
+};
+*/
 
 class Socket {
 
@@ -72,11 +113,14 @@ public:
 			readThread([&]() {
 				while (true) {
 					if (!connected) {
-						std::cout << "Disconnected, exiting read thread" << std::endl;
 						return;
 					}
 
-					readQueue.enqueue(getPacket());
+					Packet* packet = getPacket();
+					if (!packet) {
+						return;
+					}
+					readQueue.enqueue(packet);
 				}
 			}),
 			writeThread([&]() {
@@ -90,7 +134,6 @@ public:
 
 					if (!connected) {
 						delete packet;
-						std::cout << "Disconnected, not writing packet and exiting write thread" << std::endl;
 						return;
 					}
 
